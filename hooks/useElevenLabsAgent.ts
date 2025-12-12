@@ -31,8 +31,7 @@ export interface UseElevenLabsAgentResult {
 // ELEVENLABS REALTIME CONFIGURATION
 // =============================================================================
 
-// TODO: Verify this is the correct WebSocket endpoint for ElevenLabs Conversational AI
-// Docs: https://elevenlabs.io/docs/conversational-ai/api-reference
+// ElevenLabs Conversational AI WebSocket endpoint
 const ELEVENLABS_REALTIME_WS_URL = "wss://api.elevenlabs.io/v1/convai/conversation";
 
 // Audio configuration for mic capture
@@ -93,10 +92,10 @@ export function useElevenLabsAgent(): UseElevenLabsAgentResult {
   const wsRef = useRef<WebSocket | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
-  const workletNodeRef = useRef<AudioWorkletNode | null>(null);
   const playbackContextRef = useRef<AudioContext | null>(null);
   const audioQueueRef = useRef<Float32Array[]>([]);
   const isPlayingRef = useRef(false);
+  const processorRef = useRef<ScriptProcessorNode | null>(null);
 
   // =============================================================================
   // AUDIO PLAYBACK
@@ -146,9 +145,6 @@ export function useElevenLabsAgent(): UseElevenLabsAgentResult {
       try {
         const data = JSON.parse(event.data);
 
-        // TODO: Adjust these event types based on actual ElevenLabs Conversational AI WebSocket protocol
-        // Docs: https://elevenlabs.io/docs/conversational-ai/api-reference
-
         switch (data.type) {
           case "conversation_initiation_metadata":
             // Session initialized
@@ -183,7 +179,6 @@ export function useElevenLabsAgent(): UseElevenLabsAgentResult {
 
           case "audio":
             // Audio chunk from agent
-            // TODO: Verify the exact field name for audio data in ElevenLabs response
             if (data.audio?.chunk) {
               const audioData = base64ToFloat32(data.audio.chunk);
               playAudioChunk(audioData);
@@ -223,64 +218,6 @@ export function useElevenLabsAgent(): UseElevenLabsAgentResult {
   );
 
   // =============================================================================
-  // MICROPHONE CAPTURE SETUP
-  // =============================================================================
-
-  const setupMicrophoneCapture = useCallback(async () => {
-    // Request microphone permission
-    const stream = await navigator.mediaDevices.getUserMedia({
-      audio: {
-        sampleRate: SAMPLE_RATE,
-        channelCount: CHANNELS,
-        echoCancellation: true,
-        noiseSuppression: true,
-      },
-    });
-
-    mediaStreamRef.current = stream;
-
-    // Create AudioContext for processing
-    audioContextRef.current = new AudioContext({ sampleRate: SAMPLE_RATE });
-
-    // Load audio worklet for processing mic input
-    // TODO: You may need to create a separate audio worklet processor file
-    // For now, using ScriptProcessorNode (deprecated but simpler for demo)
-    const source = audioContextRef.current.createMediaStreamSource(stream);
-
-    // ScriptProcessorNode for audio capture
-    // Note: This is deprecated but works for demo purposes
-    // TODO: Replace with AudioWorkletNode for production
-    const processor = audioContextRef.current.createScriptProcessor(4096, 1, 1);
-
-    processor.onaudioprocess = (e) => {
-      if (wsRef.current?.readyState !== WebSocket.OPEN) return;
-      if (status !== "listening" && status !== "connected") return;
-
-      const inputData = e.inputBuffer.getChannelData(0);
-      const pcmData = float32ToInt16(inputData);
-      const base64Audio = int16ToBase64(pcmData);
-
-      // Send audio to ElevenLabs
-      // TODO: Verify the exact message format expected by ElevenLabs
-      wsRef.current.send(
-        JSON.stringify({
-          type: "audio",
-          // TODO: The field name might be different (e.g., "audio_chunk", "data")
-          audio: base64Audio,
-        })
-      );
-    };
-
-    source.connect(processor);
-    processor.connect(audioContextRef.current.destination);
-
-    return () => {
-      processor.disconnect();
-      source.disconnect();
-    };
-  }, [status]);
-
-  // =============================================================================
   // START SESSION
   // =============================================================================
 
@@ -299,34 +236,63 @@ export function useElevenLabsAgent(): UseElevenLabsAgentResult {
     setMessages([]);
 
     try {
-      // Set up microphone first
-      await setupMicrophoneCapture();
+      // Request microphone permission
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          sampleRate: SAMPLE_RATE,
+          channelCount: CHANNELS,
+          echoCancellation: true,
+          noiseSuppression: true,
+        },
+      });
+
+      mediaStreamRef.current = stream;
+
+      // Create AudioContext for processing
+      audioContextRef.current = new AudioContext({ sampleRate: SAMPLE_RATE });
+      const source = audioContextRef.current.createMediaStreamSource(stream);
 
       // Connect to ElevenLabs WebSocket
-      // TODO: Verify the correct query parameters / headers for auth
-      // Some APIs use query params, others use headers in the initial message
       const wsUrl = `${ELEVENLABS_REALTIME_WS_URL}?agent_id=${agentId}`;
-
       const ws = new WebSocket(wsUrl);
       wsRef.current = ws;
 
       ws.onopen = () => {
         console.log("[ElevenLabs] WebSocket connected");
 
-        // Send initialization message with API key
-        // TODO: Verify the exact initialization message format
+        // Send initialization message
         ws.send(
           JSON.stringify({
             type: "conversation_initiation_client_data",
-            conversation_config_override: {
-              // Optional: Override agent settings here
-            },
-            // TODO: Check if API key should be sent here or via different method
-            // Some implementations use signed URLs instead
+            conversation_config_override: {},
           })
         );
 
         setStatus("connected");
+
+        // Start capturing audio after WebSocket is open
+        // ScriptProcessorNode for audio capture (deprecated but simple for demo)
+        const processor = audioContextRef.current!.createScriptProcessor(4096, 1, 1);
+        processorRef.current = processor;
+
+        processor.onaudioprocess = (e) => {
+          if (wsRef.current?.readyState !== WebSocket.OPEN) return;
+
+          const inputData = e.inputBuffer.getChannelData(0);
+          const pcmData = float32ToInt16(inputData);
+          const base64Audio = int16ToBase64(pcmData);
+
+          // Send audio to ElevenLabs
+          wsRef.current.send(
+            JSON.stringify({
+              type: "audio",
+              audio: base64Audio,
+            })
+          );
+        };
+
+        source.connect(processor);
+        processor.connect(audioContextRef.current!.destination);
       };
 
       ws.onmessage = handleWebSocketMessage;
@@ -345,7 +311,7 @@ export function useElevenLabsAgent(): UseElevenLabsAgentResult {
       setStatus("disconnected");
       throw err;
     }
-  }, [setupMicrophoneCapture, handleWebSocketMessage]);
+  }, [handleWebSocketMessage]);
 
   // =============================================================================
   // STOP SESSION
@@ -356,6 +322,12 @@ export function useElevenLabsAgent(): UseElevenLabsAgentResult {
     if (mediaStreamRef.current) {
       mediaStreamRef.current.getTracks().forEach((track) => track.stop());
       mediaStreamRef.current = null;
+    }
+
+    // Disconnect processor
+    if (processorRef.current) {
+      processorRef.current.disconnect();
+      processorRef.current = null;
     }
 
     // Close audio contexts
@@ -392,7 +364,6 @@ export function useElevenLabsAgent(): UseElevenLabsAgentResult {
       return;
     }
 
-    // TODO: Verify the exact message format for sending text input
     wsRef.current.send(
       JSON.stringify({
         type: "user_message",
@@ -427,4 +398,3 @@ export function useElevenLabsAgent(): UseElevenLabsAgentResult {
     sendUserText,
   };
 }
-

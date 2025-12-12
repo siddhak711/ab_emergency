@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import {
   useElevenLabsAgent,
   TranscriptMessage,
@@ -195,11 +195,6 @@ export default function EmergencyCoach() {
   // Track processed call triggers to avoid duplicate calls
   const processedCallsRef = useRef<Set<string>>(new Set());
 
-  // Parsed messages with extracted tags
-  const [parsedMessages, setParsedMessages] = useState<
-    { original: TranscriptMessage; parsed: ParsedMessage }[]
-  >([]);
-
   // Text input for fallback/debug
   const [textInput, setTextInput] = useState("");
 
@@ -207,22 +202,22 @@ export default function EmergencyCoach() {
   const [error, setError] = useState<string | null>(null);
 
   // =============================================================================
-  // PROCESS MESSAGES FOR SPECIAL TAGS
+  // PROCESS MESSAGES FOR SPECIAL TAGS (using useMemo instead of useState)
   // =============================================================================
 
-  useEffect(() => {
-    const newParsed = messages.map((msg) => ({
+  const parsedMessages = useMemo(() => {
+    return messages.map((msg) => ({
       original: msg,
       parsed:
         msg.role === "assistant"
           ? parseAssistantMessage(msg.text)
           : { text: msg.text, resources: [], triggerCall: false },
     }));
+  }, [messages]);
 
-    setParsedMessages(newParsed);
-
-    // Check for call triggers
-    newParsed.forEach(({ original, parsed }) => {
+  // Handle call triggers as a side effect
+  useEffect(() => {
+    parsedMessages.forEach(({ original, parsed }) => {
       if (
         parsed.triggerCall &&
         !processedCallsRef.current.has(original.id)
@@ -239,7 +234,7 @@ export default function EmergencyCoach() {
         });
       }
     });
-  }, [messages, sessionId]);
+  }, [parsedMessages, sessionId]);
 
   // =============================================================================
   // START HANDLER
